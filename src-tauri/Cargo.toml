@@ -1,0 +1,43 @@
+[package]
+name = "sonora"
+version = "0.1.0"
+description = "Mezclador de audio por aplicacion para Windows"
+authors = ["Adrian"]
+edition = "2021"
+# Hay dos binarios (la app y la prueba de concepto `poc`), asi que hay que
+# decirle a cargo cual es el de por defecto o `tauri dev` no sabe cual lanzar.
+default-run = "sonora"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "sonora_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows = { version = "0.62.2", features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Threading", "Win32_Foundation", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery"] }
+png = "0.18.1"
+base64 = "0.23.1"
+tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-store = "2.4.4"
+tauri-plugin-autostart = "2.5.1"
+tauri-plugin-clipboard-manager = "2.3.3"
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
