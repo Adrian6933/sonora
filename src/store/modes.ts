@@ -1,6 +1,9 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { create } from "zustand";
 
+import type { AppGroup } from "../lib/group";
+import { remember, type KnownApp, type Preset } from "../lib/known";
+
 import {
   CYCLE_HOTKEY,
   DEFAULT_MODES,
@@ -14,6 +17,8 @@ const KEY_MODES = "modes";
 const KEY_ACTIVE = "activeModeId";
 const KEY_CYCLE = "cycleHotkey";
 const KEY_RESET = "resetHotkey";
+const KEY_KNOWN = "knownApps";
+const KEY_PRESETS = "presets";
 
 let store: Store | null = null;
 
@@ -30,6 +35,10 @@ type ModesState = {
   cycleHotkey: string;
   /** Atajo para devolver todo al 100% */
   resetHotkey: string;
+  /** Aplicaciones que han usado el audio alguna vez */
+  knownApps: KnownApp[];
+  /** Volumen preparado por aplicacion, se aplica cuando vuelve a sonar */
+  presets: Record<string, Preset>;
   /** false hasta que se ha leido el disco: evita pisar lo guardado */
   hydrated: boolean;
 
@@ -37,6 +46,10 @@ type ModesState = {
   setActive: (id: string | null) => void;
   setCycleHotkey: (accel: string) => void;
   setResetHotkey: (accel: string) => void;
+  /** Apunta las aplicaciones que suenan ahora en el registro */
+  observe: (groups: AppGroup[]) => void;
+  setPreset: (key: string, preset: Preset | null) => void;
+  forgetApp: (key: string) => void;
   upsert: (mode: Mode) => void;
   remove: (id: string) => void;
   replaceAll: (modes: Mode[]) => void;
@@ -45,12 +58,15 @@ type ModesState = {
 export const useModes = create<ModesState>((set, get) => {
   /** Escribe el estado actual a disco. */
   async function persist() {
-    const { modes, activeModeId, cycleHotkey, resetHotkey } = get();
+    const { modes, activeModeId, cycleHotkey, resetHotkey, knownApps, presets } =
+      get();
     const handle = await file();
     await handle.set(KEY_MODES, modes);
     await handle.set(KEY_ACTIVE, activeModeId);
     await handle.set(KEY_CYCLE, cycleHotkey);
     await handle.set(KEY_RESET, resetHotkey);
+    await handle.set(KEY_KNOWN, knownApps);
+    await handle.set(KEY_PRESETS, presets);
     await handle.save();
   }
 
@@ -59,6 +75,8 @@ export const useModes = create<ModesState>((set, get) => {
     activeModeId: null,
     cycleHotkey: CYCLE_HOTKEY,
     resetHotkey: RESET_HOTKEY,
+    knownApps: [],
+    presets: {},
     hydrated: false,
 
     hydrate: async () => {
@@ -68,6 +86,8 @@ export const useModes = create<ModesState>((set, get) => {
         const active = await handle.get<string | null>(KEY_ACTIVE);
         const cycle = await handle.get<string>(KEY_CYCLE);
         const reset = await handle.get<string>(KEY_RESET);
+        const known = await handle.get<KnownApp[]>(KEY_KNOWN);
+        const presets = await handle.get<Record<string, Preset>>(KEY_PRESETS);
 
         set({
           // `normalize` rellena los campos que no existian cuando se guardo:
@@ -77,6 +97,8 @@ export const useModes = create<ModesState>((set, get) => {
           activeModeId: active ?? null,
           cycleHotkey: cycle || CYCLE_HOTKEY,
           resetHotkey: reset || RESET_HOTKEY,
+          knownApps: known ?? [],
+          presets: presets ?? {},
           hydrated: true,
         });
       } catch {
@@ -100,6 +122,36 @@ export const useModes = create<ModesState>((set, get) => {
       void persist();
     },
 
+    observe: (groups) => {
+      const { list, changed } = remember(get().knownApps, groups);
+      set({ knownApps: list });
+      // Esto corre 20 veces por segundo: solo escribimos a disco cuando de
+      // verdad aparece una aplicacion nueva, no en cada refresco.
+      if (changed) void persist();
+    },
+
+    setPreset: (key, preset) => {
+      set((state) => {
+        const presets = { ...state.presets };
+        if (preset) presets[key] = preset;
+        else delete presets[key];
+        return { presets };
+      });
+      void persist();
+    },
+
+    forgetApp: (key) => {
+      set((state) => {
+        const presets = { ...state.presets };
+        delete presets[key];
+        return {
+          knownApps: state.knownApps.filter((app) => app.key !== key),
+          presets,
+        };
+      });
+      void persist();
+    },
+
     /** Usado al importar un juego de modos completo. */
     replaceAll: (modes) => {
       set({ modes: modes.map(normalize), activeModeId: null });
@@ -109,11 +161,22 @@ export const useModes = create<ModesState>((set, get) => {
     upsert: (mode) => {
       set((state) => {
         const index = state.modes.findIndex((m) => m.id === mode.id);
-        if (index === -1) return { modes: [...state.modes, mode] };
+        const modes =
+          index === -1
+            ? [...state.modes, mode]
+            : state.modes.map((m, i) => (i === index ? mode : m));
 
-        const modes = [...state.modes];
-        modes[index] = mode;
-        return { modes };
+        // "Al abrir Sonora" solo puede tenerlo uno. Marcarlo en un modo se lo
+        // quita al anterior, que es lo que espera cualquiera al activarlo.
+        if (!mode.autoActivate.onStartup) return { modes };
+
+        return {
+          modes: modes.map((m) =>
+            m.id === mode.id
+              ? m
+              : { ...m, autoActivate: { ...m.autoActivate, onStartup: false } }
+          ),
+        };
       });
       void persist();
     },

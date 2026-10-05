@@ -76,7 +76,7 @@ unsafe fn device_id(device: &IMMDevice) -> Result<String> {
     }
 }
 
-unsafe fn friendly_name(device: &IMMDevice) -> Result<String> {
+pub(crate) unsafe fn friendly_name(device: &IMMDevice) -> Result<String> {
     unsafe {
         let store = device.OpenPropertyStore(STGM_READ)?;
         let value = store.GetValue(&PKEY_Device_FriendlyName)?;

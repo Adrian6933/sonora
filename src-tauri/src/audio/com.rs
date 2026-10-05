@@ -5,21 +5,32 @@ use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITH
 /// Los objetos COM de Core Audio NO son thread-safe: cada hilo que quiera
 /// tocarlos necesita su propia inicializacion. Por eso todo el acceso al audio
 /// vive en un unico hilo con su propio guard (ver `com_thread.rs`).
-pub struct ComGuard;
+pub struct ComGuard {
+    /// Si fuimos NOSOTROS quienes inicializamos COM en este hilo.
+    ///
+    /// Importa en los hilos reutilizados, como el pool de `spawn_blocking`: si
+    /// el hilo ya venia en otro apartamento, `CoInitializeEx` falla y llamar
+    /// igualmente a `CoUninitialize` desharia la inicializacion de otro. El
+    /// sintoma es de los malos: cosas que funcionan sueltas y fallan dentro de
+    /// la aplicacion, sin error, y solo a veces.
+    nuestro: bool,
+}
 
 impl ComGuard {
     pub fn new() -> Self {
-        unsafe {
-            // Devuelve S_FALSE si COM ya estaba inicializado en este hilo,
-            // que para nosotros es igual de valido que S_OK.
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        // S_FALSE significa que ya estaba inicializado en este hilo con el
+        // mismo modelo: cuenta como exito y hay que soltarlo igual.
+        let resultado = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        Self {
+            nuestro: resultado.is_ok(),
         }
-        Self
     }
 }
 
 impl Drop for ComGuard {
     fn drop(&mut self) {
-        unsafe { CoUninitialize() };
+        if self.nuestro {
+            unsafe { CoUninitialize() };
+        }
     }
 }

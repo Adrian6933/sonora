@@ -78,6 +78,104 @@ impl ProcessWatcher {
     }
 }
 
+/// Programas abiertos ahora mismo, con su nombre tal cual lo ve Windows.
+///
+/// Para el selector del editor de modos: escribir "VALORANT.exe" a mano es
+/// justo lo que nadie deberia tener que hacer. Se queda solo con lo que parece
+/// una aplicacion de verdad; el resto es ruido del sistema que llenaria la
+/// lista sin aportar nada.
+pub fn aplicaciones_abiertas() -> Vec<String> {
+    let mut nombres: Vec<String> = Vec::new();
+    let mut vistos = HashSet::new();
+
+    unsafe {
+        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return nombres;
+        };
+
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+
+        if Process32FirstW(snapshot, &mut entry).is_ok() {
+            loop {
+                let fin = entry
+                    .szExeFile
+                    .iter()
+                    .position(|c| *c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let nombre = String::from_utf16_lossy(&entry.szExeFile[..fin]);
+
+                if es_aplicacion(&nombre) && vistos.insert(nombre.to_lowercase()) {
+                    nombres.push(nombre);
+                }
+
+                if Process32NextW(snapshot, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+
+        let _ = CloseHandle(snapshot);
+    }
+
+    nombres.sort_by_key(|n| n.to_lowercase());
+    nombres
+}
+
+/// Filtro de ruido del sistema.
+///
+/// No pretende ser exacto: vale con quitar lo que todo el mundo tiene abierto y
+/// nadie querria usar como disparador. Si se cuela alguno de mas, el buscador
+/// del selector lo tapa.
+fn es_aplicacion(nombre: &str) -> bool {
+    const SISTEMA: &[&str] = &[
+        "svchost.exe",
+        "dllhost.exe",
+        "conhost.exe",
+        "csrss.exe",
+        "wininit.exe",
+        "winlogon.exe",
+        "services.exe",
+        "lsass.exe",
+        "smss.exe",
+        "fontdrvhost.exe",
+        "dwm.exe",
+        "sihost.exe",
+        "taskhostw.exe",
+        "ctfmon.exe",
+        "runtimebroker.exe",
+        "searchhost.exe",
+        "startmenuexperiencehost.exe",
+        "shellexperiencehost.exe",
+        "applicationframehost.exe",
+        "systemsettings.exe",
+        "registry",
+        "memory compression",
+        "system",
+        "idle",
+        "audiodg.exe",
+        "spoolsv.exe",
+        "wmiprvse.exe",
+        "backgroundtaskhost.exe",
+        "crashpad_handler.exe",
+        "textinputhost.exe",
+        "widgets.exe",
+        "widgetservice.exe",
+        "lockapp.exe",
+        "useroobebroker.exe",
+        "wudfhost.exe",
+        "nissrv.exe",
+        "msmpeng.exe",
+        "securityhealthservice.exe",
+        "securityhealthsystray.exe",
+    ];
+
+    let bajo = nombre.to_lowercase();
+    !SISTEMA.contains(&bajo.as_str()) && bajo.ends_with(".exe")
+}
+
 /// Nombres de ejecutable de todos los procesos, en minusculas.
 pub fn running_processes() -> HashSet<String> {
     let mut names = HashSet::new();

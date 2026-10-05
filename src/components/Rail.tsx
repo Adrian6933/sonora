@@ -1,15 +1,23 @@
 import { motion } from "motion/react";
-import { SlidersHorizontal, Sparkles, Volume2 } from "lucide-react";
+import {
+  House,
+  SlidersHorizontal,
+  Sparkles,
+  TrendingUp,
+  Volume2,
+} from "lucide-react";
 
-export type Section = "mixer" | "modes" | "settings";
+export type Section = "home" | "mixer" | "modes" | "boost" | "settings";
 
 const ITEMS: Array<{
   id: Section;
   label: string;
   Icon: typeof Volume2;
 }> = [
+  { id: "home", label: "Inicio", Icon: House },
   { id: "mixer", label: "Mezclador", Icon: Volume2 },
   { id: "modes", label: "Modos", Icon: Sparkles },
+  { id: "boost", label: "Amplificar", Icon: TrendingUp },
   { id: "settings", label: "Ajustes", Icon: SlidersHorizontal },
 ];
 

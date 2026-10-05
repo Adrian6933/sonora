@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 use super::devices::{self, AudioDevice};
-use super::ducking::{DuckingConfig, Ducker};
+use super::ducking::{matches, DuckingConfig, Ducker};
+use super::escucha::Escuchas;
 use super::{sessions, AudioSession, ComGuard};
 
 /// Cada cuanto se muestrean los niveles. 50 ms = 20 Hz: suficiente para que los
@@ -23,6 +24,13 @@ use super::{sessions, AudioSession, ComGuard};
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type Reply<T> = Sender<Result<T, String>>;
+
+/// Aplicaciones de voz a las que se escucha siempre, haya reglas o no.
+///
+/// Son las que reflejan el sonido del ordenador en su medidor. Escucharlas
+/// siempre hace que su barra en el mezclador enseñe lo que suena de verdad, y
+/// no bailar al ritmo de Spotify. Cuesta una captura por proceso, que es poco.
+const APPS_DE_VOZ: &[&str] = &["*discord*", "*teamspeak*", "*ventrilo*", "*mumble*"];
 
 pub enum Request {
     List(Reply<Vec<AudioSession>>),
@@ -40,6 +48,9 @@ pub enum Request {
     /// hecho. Se usa antes de salir: si el proceso muriera atenuando, las
     /// aplicaciones se quedarian al 40% y el usuario no sabria por que.
     ReleaseDucking(Reply<()>),
+    /// Aplicaciones que la interfaz quiere escuchar de verdad aunque no haya
+    /// ninguna regla activa: las del editor de prioridad, para su medidor.
+    SetListenPatterns(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -60,11 +71,15 @@ impl AudioHandle {
                 let mut ducker = Ducker::new();
                 let mut last_tick = Instant::now();
                 let mut last_gain = 1.0_f32;
+                let mut last_espejos: Vec<u32> = Vec::new();
                 let mut last_device = String::new();
+                let mut escuchas = Escuchas::default();
+                let mut patrones_extra: Vec<String> = Vec::new();
 
                 loop {
                     match rx.recv_timeout(POLL_INTERVAL) {
                         Ok(Request::SetPolling(value)) => polling = value,
+                        Ok(Request::SetListenPatterns(patrones)) => patrones_extra = patrones,
                         Ok(Request::SetDucking(config)) => {
                             // Al cambiar de modo hay que devolver los
                             // volumenes que el ducking anterior tenia bajados,
@@ -97,11 +112,42 @@ impl AudioHandle {
                                 }
                             }
 
-                            let Ok(list) = sessions::list_sessions() else {
+                            let Ok(mut list) = sessions::list_sessions() else {
                                 continue;
                             };
 
+                            // A los disparadores se les escucha lo que
+                            // reproducen de verdad; su medidor de Windows puede
+                            // estar reflejando el sonido de todo el ordenador.
+                            let mut patrones = ducker.disparadores();
+                            patrones.extend(patrones_extra.iter().cloned());
+                            patrones.extend(APPS_DE_VOZ.iter().map(|p| p.to_string()));
+                            let objetivo: std::collections::HashSet<u32> = list
+                                .iter()
+                                .filter(|s| {
+                                    !s.is_system && patrones.iter().any(|p| matches(p, &s.exe))
+                                })
+                                .map(|s| s.pid)
+                                .collect();
+                            escuchas.sincroniza(&objetivo);
+
+                            for sesion in &mut list {
+                                if let Some(real) = escuchas.pico_real(sesion.pid) {
+                                    sesion.meter_peak = Some(sesion.peak);
+                                    sesion.peak = real;
+                                }
+                            }
+
                             if ducker.is_enabled() {
+                                // El pico de la mezcla final es lo que permite
+                                // reconocer a quien mide todo el sistema en vez
+                                // de su propio audio.
+                                if let (Ok(pico), Ok(master)) =
+                                    (sessions::endpoint_peak(), sessions::master_volume())
+                                {
+                                    ducker.set_device(pico, master);
+                                }
+
                                 let changes = ducker.tick(&list, dt);
                                 if !changes.is_empty() {
                                     let _ = sessions::apply_volumes(&changes);
@@ -114,6 +160,15 @@ impl AudioHandle {
                                 if (gain - last_gain).abs() > 0.01 {
                                     last_gain = gain;
                                     let _ = app.emit("ducking", gain);
+                                }
+
+                                // Los espejos cambian muy de vez en cuando; solo
+                                // se avisa cuando la lista es otra.
+                                let mut espejos = ducker.espejos();
+                                espejos.sort_unstable();
+                                if espejos != last_espejos {
+                                    last_espejos = espejos.clone();
+                                    let _ = app.emit("espejos", &espejos);
                                 }
                             }
 
@@ -168,6 +223,11 @@ impl AudioHandle {
         self.ask(|reply| Request::SetMaster(volume, reply))
     }
 
+    /// Aplicaciones a escuchar de verdad aunque no haya reglas activas.
+    pub fn set_listen_patterns(&self, patrones: Vec<String>) {
+        let _ = self.tx.send(Request::SetListenPatterns(patrones));
+    }
+
     pub fn set_polling(&self, value: bool) {
         let _ = self.tx.send(Request::SetPolling(value));
     }
@@ -203,7 +263,10 @@ fn handle(request: Request) {
         Request::ListDevices(reply) => {
             let _ = reply.send(devices::list_output_devices().map_err(stringify));
         }
-        Request::SetPolling(_) | Request::SetDucking(_) | Request::ReleaseDucking(_) => {
+        Request::SetPolling(_)
+        | Request::SetDucking(_)
+        | Request::ReleaseDucking(_)
+        | Request::SetListenPatterns(_) => {
             unreachable!("se tratan en el bucle, donde vive el estado")
         }
     }

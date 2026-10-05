@@ -21,7 +21,7 @@ export function ModesSection({
   onCreate,
 }: Props) {
   return (
-    <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
       {modes.map((mode) => {
         const active = mode.id === activeId;
         const Icon = iconComponent(mode.icon);
@@ -34,7 +34,7 @@ export function ModesSection({
             whileTap={{ scale: 0.985 }}
             transition={{ type: "spring", stiffness: 500, damping: 34 }}
             onClick={() => onActivate(mode)}
-            className="group relative flex min-h-[168px] cursor-pointer flex-col overflow-hidden rounded-[16px] border p-4"
+            className="group relative flex min-h-[212px] cursor-pointer flex-col overflow-hidden rounded-[18px] border p-5"
             style={{
               borderColor: active
                 ? `color-mix(in srgb, ${mode.accent} 55%, transparent)`
@@ -65,14 +65,14 @@ export function ModesSection({
 
             <div className="mb-3 flex items-center gap-2.5">
               <span
-                className="flex h-11 w-11 items-center justify-center rounded-[13px]
+                className="flex h-14 w-14 items-center justify-center rounded-[16px]
                            shadow-[inset_0_0_0_1px_rgba(255,255,255,0.09)]"
                 style={{
                   background: `color-mix(in srgb, ${mode.accent} 20%, #0b0d10)`,
                   color: `color-mix(in srgb, ${mode.accent} 72%, white)`,
                 }}
               >
-                <Icon size={20} strokeWidth={1.9} />
+                <Icon size={26} strokeWidth={1.8} />
               </span>
 
               {active && (
@@ -89,11 +89,21 @@ export function ModesSection({
               )}
             </div>
 
-            <div className="truncate text-[15px] font-semibold tracking-[-0.01em]">
+            <div className="truncate text-[17px] font-semibold tracking-[-0.015em]">
               {mode.name}
             </div>
 
-            <div className="mt-0.5 text-[10px] text-[var(--color-faint)]">
+            {mode.description ? (
+              <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[var(--color-muted)]">
+                {mode.description}
+              </p>
+            ) : (
+              <p className="mt-1 text-[11px] italic text-[var(--color-faint)]">
+                Sin descripción
+              </p>
+            )}
+
+            <div className="mt-2 text-[10px] text-[var(--color-faint)]">
               {mode.rules.length > 0
                 ? `${mode.rules.length} aplicaciones`
                 : "Sin reglas"}
@@ -103,7 +113,7 @@ export function ModesSection({
 
             <div className="mt-auto flex flex-wrap items-center gap-1.5 pt-3">
               {mode.hotkey && <Chip>{prettyAccel(mode.hotkey)}</Chip>}
-              {mode.ducking.enabled && (
+              {mode.duckingRules.some((rule) => rule.enabled) && (
                 <Chip accent={mode.accent}>
                   <Mic size={9} />
                   voz
@@ -128,7 +138,7 @@ export function ModesSection({
 
       <button
         onClick={onCreate}
-        className="flex min-h-[168px] flex-col items-center justify-center gap-2 rounded-[16px]
+        className="flex min-h-[212px] flex-col items-center justify-center gap-2 rounded-[18px]
                    border border-dashed border-[var(--color-line)] text-[var(--color-faint)]
                    transition hover:border-[var(--accent)] hover:bg-white/[0.02]
                    hover:text-[var(--accent)]"

@@ -24,6 +24,10 @@ export type AppGroup = {
   /** Si alguna esta emitiendo */
   active: boolean;
   isSystem: boolean;
+  /** Amplificacion activa del grupo, 1 = ninguna */
+  boost: number;
+  /** Lo que marca el medidor de Windows si `peak` es sonido real; ver ipc.ts */
+  meterPeak?: number;
 };
 
 export function groupSessions(sessions: AudioSession[]): AppGroup[] {
@@ -45,6 +49,8 @@ export function groupSessions(sessions: AudioSession[]): AppGroup[] {
         peak: session.peak,
         active: session.active,
         isSystem: session.isSystem,
+        boost: session.boost ?? 1,
+        meterPeak: session.meterPeak,
       });
       continue;
     }
@@ -54,6 +60,10 @@ export function groupSessions(sessions: AudioSession[]): AppGroup[] {
     existing.peak = Math.max(existing.peak, session.peak);
     existing.muted = existing.muted && session.muted;
     existing.active = existing.active || session.active;
+    existing.boost = Math.max(existing.boost, session.boost ?? 1);
+    if (session.meterPeak !== undefined) {
+      existing.meterPeak = Math.max(existing.meterPeak ?? 0, session.meterPeak);
+    }
   }
 
   return [...groups.values()].sort((a, b) => {

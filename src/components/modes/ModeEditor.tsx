@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { motion } from "motion/react";
-import { Camera, Trash2, X } from "lucide-react";
+import { Camera, Power, Trash2, X } from "lucide-react";
 
 import type { AppGroup } from "../../lib/group";
 import type { AudioDevice } from "../../lib/ipc";
+import type { KnownApp } from "../../lib/known";
 import { MODE_ICONS, MODE_ICON_KEYS, resolveIcon } from "../../lib/icons";
-import { rulesFromCurrent, type Mode } from "../../lib/modes";
+import { prettyPattern, rulesFromCurrent, type Mode } from "../../lib/modes";
+import { AppPicker } from "./AppPicker";
 import { DuckingEditor } from "./DuckingEditor";
 import { VolumeSlider } from "../ui/VolumeSlider";
 import { HotkeyRecorder } from "./HotkeyRecorder";
@@ -19,10 +21,29 @@ const ACCENTS = [
   "#facc15",
 ];
 
+/**
+ * Las cuatro cosas que tiene un modo, separadas.
+ *
+ * Antes estaba todo en una sola columna larga y habia que hacer scroll para
+ * entender que hacia cada parte. Cada apartado responde a una pregunta
+ * distinta, asi que se ven de uno en uno.
+ */
+const PESTANAS = [
+  { id: "general", label: "General", pista: "Nombre, icono y atajo" },
+  { id: "auto", label: "Cuándo se activa", pista: "Solo, sin tocar nada" },
+  { id: "prioridad", label: "Prioridad", pista: "Qué baja mientras suena qué" },
+  { id: "volumenes", label: "Volúmenes", pista: "Cómo queda todo al entrar" },
+] as const;
+
+type Pestana = (typeof PESTANAS)[number]["id"];
+
 type Props = {
   mode: Mode;
   groups: AppGroup[];
   devices: AudioDevice[];
+  knownApps: KnownApp[];
+  /** Iconos ya extraídos, indexados por ruta del ejecutable */
+  icons: Record<string, string>;
   /** false para los modos de fabrica recien creados que aun no se han guardado */
   canDelete: boolean;
   onSave: (mode: Mode) => void;
@@ -34,14 +55,22 @@ export function ModeEditor({
   mode,
   groups,
   devices,
+  knownApps,
+  icons,
   canDelete,
   onSave,
   onDelete,
   onClose,
 }: Props) {
   const [draft, setDraft] = useState<Mode>(mode);
+  const [pestana, setPestana] = useState<Pestana>("general");
+
   const patch = (changes: Partial<Mode>) =>
     setDraft((current) => ({ ...current, ...changes }));
+  const patchAuto = (changes: Partial<Mode["autoActivate"]>) =>
+    patch({ autoActivate: { ...draft.autoActivate, ...changes } });
+
+  const Icono = MODE_ICONS[resolveIcon(draft.icon)];
 
   return (
     <motion.div
@@ -49,7 +78,8 @@ export function ModeEditor({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       onClick={onClose}
-      className="absolute inset-0 z-10 flex items-center justify-center bg-black/55 p-6 backdrop-blur-[3px]"
+      className="absolute inset-0 z-10 flex items-center justify-center
+                 bg-black/60 p-4 backdrop-blur-[3px] sm:p-8"
     >
       <motion.div
         // El clic en el fondo cierra; dentro del panel no debe propagarse.
@@ -58,390 +88,495 @@ export function ModeEditor({
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.97, y: 8 }}
         transition={{ type: "spring", stiffness: 420, damping: 34 }}
-        className="flex max-h-full w-[440px] flex-col overflow-hidden rounded-[16px]
-                   border border-[var(--color-line)] bg-[var(--color-base)] shadow-2xl"
+        className="flex max-h-full w-full max-w-[760px] flex-col overflow-hidden
+                   rounded-[18px] border border-[var(--color-line)]
+                   bg-[var(--color-base)] shadow-2xl"
+        style={{ ["--accent" as string]: draft.accent }}
       >
-      <div className="flex h-11 shrink-0 items-center justify-between border-b border-[var(--color-line)] pl-4 pr-1">
-        <span className="text-[12px] font-semibold">Editar modo</span>
-        <button
-          onClick={onClose}
-          aria-label="Cerrar"
-          className="flex h-8 w-10 items-center justify-center rounded-lg
-                     text-[var(--color-faint)] hover:bg-[var(--color-surface-2)]
-                     hover:text-[var(--color-text)]"
+        {/* Cabecera: el modo se ve tal y como quedara */}
+        <div
+          className="flex shrink-0 items-center gap-3 border-b border-[var(--color-line)] px-4 py-3.5"
+          style={{
+            background: `linear-gradient(120deg, color-mix(in srgb, ${draft.accent} 14%, transparent), transparent 60%)`,
+          }}
         >
-          <X size={14} />
-        </button>
-      </div>
+          <span
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px]"
+            style={{
+              background: `color-mix(in srgb, ${draft.accent} 20%, transparent)`,
+              color: draft.accent,
+            }}
+          >
+            <Icono size={19} strokeWidth={1.9} />
+          </span>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
-        {/* Identidad */}
-        <input
-          value={draft.name}
-          onChange={(e) => patch({ name: e.target.value })}
-          aria-label="Nombre del modo"
-          placeholder="Nombre del modo"
-          className="w-full rounded-lg border border-[var(--color-line)] bg-[var(--color-surface-2)]
-                     px-3 py-2 text-[13px] outline-none focus:border-[var(--accent)]"
-        />
-
-        <div>
-          <Label>Icono</Label>
-          <div className="grid grid-cols-6 gap-1.5">
-            {MODE_ICON_KEYS.map((key) => {
-              const Icon = MODE_ICONS[key];
-              const selected = resolveIcon(draft.icon) === key;
-
-              return (
-                <button
-                  key={key}
-                  onClick={() => patch({ icon: key })}
-                  aria-label={key}
-                  className="flex h-9 items-center justify-center rounded-lg border"
-                  style={{
-                    borderColor: selected ? draft.accent : "var(--color-line)",
-                    background: selected
-                      ? `color-mix(in srgb, ${draft.accent} 16%, transparent)`
-                      : "var(--color-surface)",
-                    color: selected ? draft.accent : "var(--color-faint)",
-                  }}
-                >
-                  <Icon size={15} strokeWidth={1.9} />
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Color */}
-        <div>
-          <Label>Color</Label>
-          <div className="flex gap-2">
-            {ACCENTS.map((color) => (
-              <button
-                key={color}
-                onClick={() => patch({ accent: color })}
-                aria-label={`Color ${color}`}
-                className="h-6 w-6 rounded-full border-2"
-                style={{
-                  background: color,
-                  borderColor:
-                    draft.accent === color ? "var(--color-text)" : "transparent",
-                }}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* Atajo */}
-        <div>
-          <Label>Atajo global</Label>
-          <HotkeyRecorder
-            value={draft.hotkey}
-            onChange={(hotkey) => patch({ hotkey })}
+          <input
+            value={draft.name}
+            onChange={(e) => patch({ name: e.target.value })}
+            aria-label="Nombre del modo"
+            placeholder="Nombre del modo"
+            className="min-w-0 flex-1 bg-transparent text-[19px] font-semibold
+                       tracking-[-0.02em] outline-none placeholder:text-[var(--color-faint)]"
           />
+
+          <button
+            onClick={onClose}
+            aria-label="Cerrar"
+            className="flex h-8 w-9 shrink-0 items-center justify-center rounded-lg
+                       text-[var(--color-faint)] hover:bg-[var(--color-surface-2)]
+                       hover:text-[var(--color-text)]"
+          >
+            <X size={14} />
+          </button>
         </div>
 
-        {/* Automatizacion */}
-        <div>
-          <Label>Activarse solo</Label>
+        {/* Pestañas */}
+        <div className="flex shrink-0 gap-1 border-b border-[var(--color-line)] px-3">
+          {PESTANAS.map(({ id, label, pista }) => {
+            const activa = id === pestana;
 
-          <div className="rounded-lg bg-[var(--color-surface)] px-2.5 py-2">
-            <div className="mb-1.5 text-[10px] text-[var(--color-muted)]">
-              Al abrir estos programas
+            return (
+              <button
+                key={id}
+                onClick={() => setPestana(id)}
+                title={pista}
+                className="relative px-3 py-2.5 text-[12px] transition-colors"
+                style={{
+                  color: activa ? draft.accent : "var(--color-faint)",
+                  fontWeight: activa ? 600 : 400,
+                }}
+              >
+                {label}
+                {activa && (
+                  <motion.span
+                    layoutId="pestana-modo"
+                    transition={{ type: "spring", stiffness: 500, damping: 38 }}
+                    className="absolute inset-x-2 -bottom-px h-[2px] rounded-full"
+                    style={{ background: draft.accent }}
+                  />
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          {pestana === "general" && (
+            <div className="flex flex-col gap-5">
+              <Bloque
+                titulo="Para qué lo usas"
+                pista="Se ve en la tarjeta del modo, para no adivinar qué hacía"
+              >
+                <textarea
+                  value={draft.description}
+                  onChange={(e) =>
+                    patch({ description: e.target.value.slice(0, 160) })
+                  }
+                  placeholder="Música alta y el juego bajo, para cuando estoy solo."
+                  rows={2}
+                  className="w-full resize-none rounded-[10px] border border-[var(--color-line)]
+                             bg-[var(--color-surface-2)] px-3 py-2.5 text-[12px] leading-relaxed
+                             outline-none focus:border-[var(--accent)]"
+                />
+                <div className="mt-1 text-right text-[9px] text-[var(--color-faint)]">
+                  {draft.description.length}/160
+                </div>
+              </Bloque>
+
+              <Bloque titulo="Icono y color" pista="Para reconocerlo de un vistazo">
+                <div className="grid grid-cols-6 gap-1.5">
+                  {MODE_ICON_KEYS.map((key) => {
+                    const Icon = MODE_ICONS[key];
+                    const selected = resolveIcon(draft.icon) === key;
+
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => patch({ icon: key })}
+                        aria-label={key}
+                        className="flex h-10 items-center justify-center rounded-[10px] border transition-colors"
+                        style={{
+                          borderColor: selected
+                            ? draft.accent
+                            : "var(--color-line)",
+                          background: selected
+                            ? `color-mix(in srgb, ${draft.accent} 16%, transparent)`
+                            : "var(--color-surface-2)",
+                          color: selected
+                            ? draft.accent
+                            : "var(--color-muted)",
+                        }}
+                      >
+                        <Icon size={16} strokeWidth={1.9} />
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-2.5 flex gap-2">
+                  {ACCENTS.map((color) => (
+                    <button
+                      key={color}
+                      onClick={() => patch({ accent: color })}
+                      aria-label={`Color ${color}`}
+                      className="h-7 w-7 rounded-full transition-transform"
+                      style={{
+                        background: color,
+                        outline:
+                          draft.accent === color
+                            ? `2px solid ${color}`
+                            : "none",
+                        outlineOffset: 2,
+                      }}
+                    />
+                  ))}
+                </div>
+              </Bloque>
+
+              <Bloque
+                titulo="Atajo de teclado"
+                pista="Funciona con el juego a pantalla completa"
+              >
+                <HotkeyRecorder
+                  value={draft.hotkey}
+                  onChange={(hotkey) => patch({ hotkey })}
+                />
+              </Bloque>
             </div>
+          )}
 
-            <div className="mb-2 flex flex-wrap gap-1.5">
-              {draft.autoActivate.processes.map((name) => (
-                <span
-                  key={name}
-                  className="flex items-center gap-1 rounded-md bg-[var(--color-surface-2)] px-1.5 py-0.5 text-[10px]"
+          {pestana === "auto" && (
+            <div className="flex flex-col gap-5">
+              <p className="text-[12px] leading-relaxed text-[var(--color-muted)]">
+                Todo esto es opcional. Sin nada marcado, el modo solo entra
+                cuando lo eliges tú o pulsas su atajo.
+              </p>
+
+              <Bloque
+                titulo="Al abrir Sonora"
+                pista="El modo con el que quieres empezar siempre"
+              >
+                <label className="flex cursor-pointer items-start gap-2.5 text-[12px] leading-relaxed">
+                  <input
+                    type="checkbox"
+                    checked={draft.autoActivate.onStartup}
+                    onChange={(e) => patchAuto({ onStartup: e.target.checked })}
+                    className="mt-0.5 accent-[var(--accent)]"
+                  />
+                  <span>
+                    Empezar con este modo
+                    <span className="mt-0.5 block text-[10px] text-[var(--color-faint)]">
+                      Solo puede tenerlo un modo. Si lo marcas aquí, se le quita
+                      al que lo tuviera.
+                    </span>
+                  </span>
+                </label>
+
+                {draft.autoActivate.onStartup && (
+                  <p
+                    className="mt-2.5 flex items-center gap-1.5 text-[11px]"
+                    style={{ color: draft.accent }}
+                  >
+                    <Power size={11} strokeWidth={2} />
+                    Este es tu modo de arranque
+                  </p>
+                )}
+              </Bloque>
+
+              <Bloque
+                titulo="Al abrir un programa"
+                pista="Elígelo de la lista, sin escribir nombres"
+              >
+                <AppPicker
+                  elegidos={draft.autoActivate.processes}
+                  knownApps={knownApps}
+                  accent={draft.accent}
+                  onChange={(processes) => patchAuto({ processes })}
+                />
+                <p className="mt-2 text-[11px] leading-relaxed text-[var(--color-faint)]">
+                  Al cerrar el programa, Sonora vuelve al modo que tuvieras
+                  antes.
+                </p>
+              </Bloque>
+
+              {devices.length > 0 && (
+                <Bloque
+                  titulo="Al cambiar de salida"
+                  pista="Por ejemplo, al ponerte los cascos"
                 >
-                  {name}
-                  <button
-                    onClick={() =>
-                      patch({
-                        autoActivate: {
-                          ...draft.autoActivate,
-                          processes: draft.autoActivate.processes.filter(
-                            (p) => p !== name
-                          ),
-                        },
+                  <div className="space-y-1.5">
+                    {devices.map((device) => {
+                      const checked = draft.autoActivate.devices.includes(
+                        device.id
+                      );
+
+                      return (
+                        <label
+                          key={device.id}
+                          className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--color-muted)]"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) =>
+                              patchAuto({
+                                devices: e.target.checked
+                                  ? [...draft.autoActivate.devices, device.id]
+                                  : draft.autoActivate.devices.filter(
+                                      (id) => id !== device.id
+                                    ),
+                              })
+                            }
+                            className="accent-[var(--accent)]"
+                          />
+                          <span className="truncate" title={device.name}>
+                            {device.name}
+                          </span>
+                          {device.isDefault && (
+                            <span className="shrink-0 text-[9px] text-[var(--color-faint)]">
+                              en uso
+                            </span>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </Bloque>
+              )}
+
+              <Bloque titulo="A cierta hora" pista="Puede cruzar la medianoche">
+                <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--color-muted)]">
+                  <input
+                    type="checkbox"
+                    checked={draft.autoActivate.schedule !== null}
+                    onChange={(e) =>
+                      patchAuto({
+                        schedule: e.target.checked
+                          ? { from: "23:00", to: "08:00" }
+                          : null,
                       })
                     }
-                    aria-label={`Quitar ${name}`}
-                    className="text-[var(--color-faint)] hover:text-[#f43f5e]"
-                  >
-                    <X size={9} />
-                  </button>
-                </span>
-              ))}
-              {draft.autoActivate.processes.length === 0 && (
-                <span className="text-[10px] text-[var(--color-faint)]">
-                  Ninguno
-                </span>
-              )}
-            </div>
+                    className="accent-[var(--accent)]"
+                  />
+                  En una franja horaria
+                </label>
 
-            <input
-              placeholder="VALORANT.exe y Enter"
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") return;
-                const value = event.currentTarget.value.trim();
-                if (!value) return;
-
-                if (!draft.autoActivate.processes.includes(value)) {
-                  patch({
-                    autoActivate: {
-                      ...draft.autoActivate,
-                      processes: [...draft.autoActivate.processes, value],
-                    },
-                  });
-                }
-                event.currentTarget.value = "";
-              }}
-              className="w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)]
-                         px-2 py-1 text-[11px] outline-none focus:border-[var(--accent)]"
-            />
-
-            <p className="mt-1.5 text-[10px] leading-relaxed text-[var(--color-faint)]">
-              Al cerrarlos vuelve al modo que tuvieras antes.
-            </p>
-          </div>
-
-          {devices.length > 0 && (
-            <div className="mt-2 rounded-lg bg-[var(--color-surface)] px-2.5 py-2">
-              <div className="mb-1.5 text-[10px] text-[var(--color-muted)]">
-                Al cambiar a estos dispositivos
-              </div>
-
-              <div className="space-y-1">
-                {devices.map((device) => {
-                  const checked = draft.autoActivate.devices.includes(device.id);
-
-                  return (
-                    <label
-                      key={device.id}
-                      className="flex cursor-pointer items-center gap-2 text-[10px] text-[var(--color-muted)]"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={(e) =>
-                          patch({
-                            autoActivate: {
-                              ...draft.autoActivate,
-                              devices: e.target.checked
-                                ? [...draft.autoActivate.devices, device.id]
-                                : draft.autoActivate.devices.filter(
-                                    (id) => id !== device.id
-                                  ),
-                            },
-                          })
-                        }
-                        className="accent-[var(--accent)]"
-                      />
-                      <span className="truncate" title={device.name}>
-                        {device.name}
-                      </span>
-                      {device.isDefault && (
-                        <span className="shrink-0 text-[9px] text-[var(--color-faint)]">
-                          activo
-                        </span>
-                      )}
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-[var(--color-muted)]">
-            <input
-              type="checkbox"
-              checked={draft.autoActivate.schedule !== null}
-              onChange={(e) =>
-                patch({
-                  autoActivate: {
-                    ...draft.autoActivate,
-                    schedule: e.target.checked
-                      ? { from: "23:00", to: "08:00" }
-                      : null,
-                  },
-                })
-              }
-              className="accent-[var(--accent)]"
-            />
-            En una franja horaria
-          </label>
-
-          {draft.autoActivate.schedule && (
-            <div className="mt-2 flex items-center gap-2 rounded-lg bg-[var(--color-surface)] px-2.5 py-2">
-              <TimeInput
-                value={draft.autoActivate.schedule.from}
-                onChange={(from) =>
-                  patch({
-                    autoActivate: {
-                      ...draft.autoActivate,
-                      schedule: { ...draft.autoActivate.schedule!, from },
-                    },
-                  })
-                }
-              />
-              <span className="text-[10px] text-[var(--color-faint)]">a</span>
-              <TimeInput
-                value={draft.autoActivate.schedule.to}
-                onChange={(to) =>
-                  patch({
-                    autoActivate: {
-                      ...draft.autoActivate,
-                      schedule: { ...draft.autoActivate.schedule!, to },
-                    },
-                  })
-                }
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Prioridad de audio */}
-        <div>
-          <Label>Prioridad de audio</Label>
-          <DuckingEditor
-            value={draft.ducking}
-            accent={draft.accent}
-            groups={groups}
-            onChange={(ducking) => patch({ ducking })}
-          />
-        </div>
-
-        {/* Reglas */}
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <Label className="mb-0">Aplicaciones ({draft.rules.length})</Label>
-            <button
-              onClick={() => patch({ rules: rulesFromCurrent(groups) })}
-              title="Copia los volumenes que tienes ahora mismo en el mezclador"
-              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px]
-                         text-[var(--color-faint)] hover:bg-[var(--color-surface-2)]
-                         hover:text-[var(--color-text)]"
-            >
-              <Camera size={11} />
-              Guardar niveles actuales
-            </button>
-          </div>
-
-          {draft.rules.length === 0 && (
-            <p className="rounded-lg bg-[var(--color-surface)] px-3 py-2.5 text-[11px] leading-relaxed text-[var(--color-faint)]">
-              Sin reglas todavia. Ajusta el mezclador como lo quieras y pulsa
-              «Guardar niveles actuales».
-            </p>
-          )}
-
-          <div className="space-y-2">
-            {draft.rules.map((rule, index) => (
-              <div
-                key={`${rule.match}-${index}`}
-                className="rounded-lg bg-[var(--color-surface)] px-2.5 py-2"
-              >
-                <div className="mb-1.5 flex items-center justify-between gap-2">
-                  <span className="truncate text-[11px]">{rule.match}</span>
-                  <span className="flex shrink-0 items-center gap-1.5">
-                    <span className="tabular text-[10px] text-[var(--color-muted)]">
-                      {Math.round(rule.volume * 100)}%
-                    </span>
-                    <button
-                      onClick={() =>
-                        patch({
-                          rules: draft.rules.filter((_, i) => i !== index),
+                {draft.autoActivate.schedule && (
+                  <div className="mt-2.5 flex items-center gap-2">
+                    <TimeInput
+                      value={draft.autoActivate.schedule.from}
+                      onChange={(from) =>
+                        patchAuto({
+                          schedule: { ...draft.autoActivate.schedule!, from },
                         })
                       }
-                      aria-label={`Quitar ${rule.match}`}
-                      className="text-[var(--color-faint)] hover:text-[#f43f5e]"
-                    >
-                      <Trash2 size={11} />
-                    </button>
-                  </span>
-                </div>
-                <VolumeSlider
-                  value={rule.volume}
-                  onChange={(volume) => {
-                    const rules = [...draft.rules];
-                    rules[index] = { ...rule, volume, muted: volume === 0 };
-                    patch({ rules });
-                  }}
-                />
-              </div>
-            ))}
-          </div>
-        </div>
+                    />
+                    <span className="text-[10px] text-[var(--color-faint)]">
+                      a
+                    </span>
+                    <TimeInput
+                      value={draft.autoActivate.schedule.to}
+                      onChange={(to) =>
+                        patchAuto({
+                          schedule: { ...draft.autoActivate.schedule!, to },
+                        })
+                      }
+                    />
+                  </div>
+                )}
+              </Bloque>
+            </div>
+          )}
 
-        {/* Resto de aplicaciones */}
-        <div>
-          <Label>Las demas aplicaciones</Label>
-          <label className="mb-2 flex cursor-pointer items-center gap-2 text-[11px] text-[var(--color-muted)]">
-            <input
-              type="checkbox"
-              checked={draft.fallbackVolume !== null}
-              onChange={(e) =>
-                patch({ fallbackVolume: e.target.checked ? 0.5 : null })
-              }
-              className="accent-[var(--accent)]"
-            />
-            Fijarles tambien un volumen
-          </label>
-
-          {draft.fallbackVolume !== null && (
-            <div className="rounded-lg bg-[var(--color-surface)] px-2.5 py-2">
-              <div className="mb-1.5 text-right">
-                <span className="tabular text-[10px] text-[var(--color-muted)]">
-                  {Math.round(draft.fallbackVolume * 100)}%
-                </span>
-              </div>
-              <VolumeSlider
-                value={draft.fallbackVolume}
-                onChange={(fallbackVolume) => patch({ fallbackVolume })}
+          {pestana === "prioridad" && (
+            <div>
+              <p className="mb-4 max-w-[62ch] text-[12px] leading-relaxed text-[var(--color-muted)]">
+                Baja unas aplicaciones automáticamente mientras suenan otras. Lo
+                típico: que el juego baje solo mientras alguien habla, y vuelva
+                al callarse.
+              </p>
+              <DuckingEditor
+                rules={draft.duckingRules}
+                accent={draft.accent}
+                groups={groups}
+                knownApps={knownApps}
+                icons={icons}
+                onChange={(duckingRules) => patch({ duckingRules })}
               />
             </div>
           )}
-        </div>
-      </div>
 
-      {/* Acciones */}
-      <div className="flex shrink-0 items-center gap-2 border-t border-[var(--color-line)] px-4 py-3">
-        {canDelete && (
+          {pestana === "volumenes" && (
+            <div className="flex flex-col gap-5">
+              <Bloque
+                titulo={`Al entrar en el modo (${draft.rules.length})`}
+                pista="Deja el mezclador como tú quieras y guárdalo de un golpe"
+                accion={
+                  <button
+                    onClick={() => patch({ rules: rulesFromCurrent(groups) })}
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--color-line)]
+                               px-2.5 py-1.5 text-[11px] text-[var(--color-muted)]
+                               transition-colors hover:text-[var(--color-text)]"
+                  >
+                    <Camera size={12} />
+                    Guardar niveles actuales
+                  </button>
+                }
+              >
+                {draft.rules.length === 0 ? (
+                  <p className="rounded-[10px] bg-[var(--color-surface)] px-3 py-3 text-[11px] leading-relaxed text-[var(--color-faint)]">
+                    Sin nada guardado todavía. Pon el mezclador como te guste y
+                    pulsa «Guardar niveles actuales».
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {draft.rules.map((rule, index) => (
+                      <div
+                        key={`${rule.match}-${index}`}
+                        className="rounded-[10px] bg-[var(--color-surface)] px-3 py-2.5"
+                      >
+                        <div className="mb-1.5 flex items-center justify-between gap-2">
+                          <span className="truncate text-[12px]">
+                            {prettyPattern(rule.match)}
+                          </span>
+                          <span className="flex shrink-0 items-center gap-2">
+                            <span className="tabular text-[12px] font-medium text-[var(--color-muted)]">
+                              {Math.round(rule.volume * 100)}%
+                            </span>
+                            <button
+                              onClick={() =>
+                                patch({
+                                  rules: draft.rules.filter(
+                                    (_, i) => i !== index
+                                  ),
+                                })
+                              }
+                              aria-label={`Quitar ${rule.match}`}
+                              className="text-[var(--color-faint)] hover:text-[#f43f5e]"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          </span>
+                        </div>
+                        <VolumeSlider
+                          value={rule.volume}
+                          onChange={(volume) => {
+                            const rules = [...draft.rules];
+                            rules[index] = {
+                              ...rule,
+                              volume,
+                              muted: volume === 0,
+                            };
+                            patch({ rules });
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Bloque>
+
+              <Bloque
+                titulo="Las demás aplicaciones"
+                pista="Las que no tienen nada guardado arriba"
+              >
+                <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--color-muted)]">
+                  <input
+                    type="checkbox"
+                    checked={draft.fallbackVolume !== null}
+                    onChange={(e) =>
+                      patch({ fallbackVolume: e.target.checked ? 0.5 : null })
+                    }
+                    className="accent-[var(--accent)]"
+                  />
+                  Fijarles también un volumen
+                </label>
+
+                {draft.fallbackVolume !== null && (
+                  <div className="mt-2.5 rounded-[10px] bg-[var(--color-surface)] px-3 py-2.5">
+                    <div className="mb-1.5 text-right">
+                      <span className="tabular text-[11px] text-[var(--color-muted)]">
+                        {Math.round(draft.fallbackVolume * 100)}%
+                      </span>
+                    </div>
+                    <VolumeSlider
+                      value={draft.fallbackVolume}
+                      onChange={(fallbackVolume) => patch({ fallbackVolume })}
+                    />
+                  </div>
+                )}
+              </Bloque>
+            </div>
+          )}
+        </div>
+
+        {/* Acciones */}
+        <div className="flex shrink-0 items-center gap-2 border-t border-[var(--color-line)] px-5 py-3.5">
+          {canDelete && (
+            <button
+              onClick={() => {
+                onDelete(draft.id);
+                onClose();
+              }}
+              className="rounded-lg px-2.5 py-1.5 text-[11px] text-[var(--color-faint)]
+                         hover:bg-[#450a0a] hover:text-[#fca5a5]"
+            >
+              Eliminar
+            </button>
+          )}
+          <div className="flex-1" />
+          <button
+            onClick={onClose}
+            className="rounded-lg px-3 py-1.5 text-[11px] text-[var(--color-muted)]
+                       hover:bg-[var(--color-surface-2)]"
+          >
+            Cancelar
+          </button>
           <button
             onClick={() => {
-              onDelete(draft.id);
+              onSave(draft);
               onClose();
             }}
-            className="rounded-lg px-2.5 py-1.5 text-[11px] text-[var(--color-faint)]
-                       hover:bg-[#450a0a] hover:text-[#fca5a5]"
+            className="rounded-[10px] px-4 py-2 text-[12px] font-semibold text-black transition"
+            style={{ background: draft.accent }}
           >
-            Eliminar
+            Guardar
           </button>
-        )}
-        <div className="flex-1" />
-        <button
-          onClick={onClose}
-          className="rounded-lg px-3 py-1.5 text-[11px] text-[var(--color-muted)]
-                     hover:bg-[var(--color-surface-2)]"
-        >
-          Cancelar
-        </button>
-        <button
-          onClick={() => {
-            onSave(draft);
-            onClose();
-          }}
-          className="rounded-lg px-3 py-1.5 text-[11px] font-medium text-black"
-          style={{ background: draft.accent }}
-        >
-          Guardar
-        </button>
-      </div>
+        </div>
       </motion.div>
     </motion.div>
+  );
+}
+
+/**
+ * Un apartado con su titulo y una linea que explica para que sirve.
+ *
+ * La pista es lo importante: un titulo solo dice como se llama, no que hace.
+ */
+function Bloque({
+  titulo,
+  pista,
+  accion,
+  children,
+}: {
+  titulo: string;
+  pista: string;
+  accion?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <div className="mb-2.5 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-[13px] font-semibold text-[var(--color-text)]">
+            {titulo}
+          </h3>
+          <p className="mt-0.5 text-[11px] text-[var(--color-faint)]">{pista}</p>
+        </div>
+        {accion}
+      </div>
+      {children}
+    </section>
   );
 }
 
@@ -458,23 +593,7 @@ function TimeInput({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       className="tabular rounded-md border border-[var(--color-line)] bg-[var(--color-surface-2)]
-                 px-2 py-1 text-[11px] outline-none focus:border-[var(--accent)]"
+                 px-2.5 py-1.5 text-[12px] outline-none focus:border-[var(--accent)]"
     />
-  );
-}
-
-function Label({
-  children,
-  className = "",
-}: {
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div
-      className={`mb-1.5 text-[10px] font-semibold uppercase tracking-[0.09em] text-[var(--color-faint)] ${className}`}
-    >
-      {children}
-    </div>
   );
 }

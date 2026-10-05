@@ -30,7 +30,7 @@ export function ChannelStrip({
   const clipping = level > 0.85;
 
   return (
-    <div className="flex w-[96px] shrink-0 flex-col items-center px-3 py-4">
+    <div className="flex h-full w-full min-w-[88px] max-w-[168px] flex-1 shrink-0 flex-col items-center px-3 py-4">
       <span
         className="tabular text-[17px] font-semibold leading-none tracking-[-0.02em]"
         style={{ color: dimmed ? "var(--color-faint)" : "var(--color-text)" }}
@@ -38,7 +38,20 @@ export function ChannelStrip({
         {Math.round(session.volume * 100)}
       </span>
 
-      <div className="mt-4 flex h-[228px] items-stretch gap-2">
+      {session.boost > 1 && (
+        <span
+          className="mt-1 rounded-full px-1.5 py-0.5 text-[9px] font-medium"
+          style={{
+            background: "color-mix(in srgb, var(--accent) 18%, transparent)",
+            color: "var(--accent)",
+          }}
+          title="Sonora está amplificando esta aplicación por encima del 100%"
+        >
+          x{session.boost.toFixed(1).replace(".", ",")}
+        </span>
+      )}
+
+      <div className="mt-3 flex min-h-[90px] w-full min-w-0 flex-1 items-stretch justify-center gap-2">
         {/* Medidor de nivel, a la izquierda del fader como en una mesa real */}
         <div className="relative w-[4px] overflow-hidden rounded-full bg-black/50">
           <div

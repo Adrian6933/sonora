@@ -11,6 +11,17 @@ use crate::system::watcher::ProcessWatcher;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Tiene que ir el PRIMERO: si ya hay una Sonora corriendo, este cierra
+        // la nueva y saca al frente la que estaba. Dos instancias significan dos
+        // juegos de atajos globales peleandose por las mismas teclas, dos hilos
+        // de audio y dos iconos en la bandeja.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -31,6 +42,14 @@ pub fn run() {
             app.manage(watcher);
 
             app.manage(Hud::new());
+            app.manage(crate::audio::boosts::Boosts::new());
+
+            // Si la ultima vez Sonora se cerro de golpe con algo amplificado,
+            // esa aplicacion sigue en el 2%. Se devuelve antes de nada.
+            std::thread::spawn(|| {
+                let _com = crate::audio::ComGuard::new();
+                crate::audio::boosts::recupera_tras_cierre();
+            });
 
             system::tray::build(app.handle())?;
 
@@ -88,10 +107,16 @@ pub fn run() {
             commands::get_master_volume,
             commands::set_master_volume,
             commands::get_app_icon,
+            commands::set_app_boost,
+            commands::list_boosts,
+            commands::clear_boosts,
             commands::set_ducking,
             commands::flash_hud,
             commands::list_devices,
             commands::set_watched_processes,
+            commands::list_open_apps,
+            commands::set_tray_modes,
+            commands::set_listen_patterns,
             commands::set_polling,
         ])
         .run(tauri::generate_context!())

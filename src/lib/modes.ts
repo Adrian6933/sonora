@@ -11,10 +11,10 @@ export type AppRule = {
 };
 
 /**
- * Configuracion del ducking. Espejo de `DuckingConfig` en Rust
- * (src-tauri/src/audio/ducking.rs).
+ * Una regla de prioridad: "cuando suene X, baja Y hasta Z%".
+ * Espejo de `DuckingRule` en Rust (src-tauri/src/audio/ducking.rs).
  */
-export type Ducking = {
+export type DuckingRule = {
   enabled: boolean;
   /** Patrones de ejecutable que disparan la atenuacion */
   triggers: string[];
@@ -22,19 +22,35 @@ export type Ducking = {
   targets: string[];
   /** Pico a partir del cual se considera que hay voz (0..1) */
   threshold: number;
-  /** 0.4 = baja al 40% */
+  /** Cuanto tiene que aguantar por encima del umbral para contar como voz */
+  sustainMs: number;
+  /** 0.4 = baja al 40%. En modo proporcional es el tope. */
   reduction: number;
+  /** La bajada acompaña al volumen del disparador en vez de ser fija */
+  proportional: boolean;
+  /** Cuánto sonido por encima del umbral hace falta para llegar al tope */
+  range: number;
   attackMs: number;
   releaseMs: number;
   holdMs: number;
 };
 
-export const DEFAULT_DUCKING: Ducking = {
-  enabled: false,
+export const DEFAULT_RULE: DuckingRule = {
+  enabled: true,
   triggers: ["*discord*", "*teamspeak*", "*ventrilo*"],
   targets: [],
-  threshold: 0.02,
+  // Suficiente para que no lo dispare un teclazo o el ventilador; se afina
+  // con el medidor en vivo del editor.
+  // Medido en una llamada real de Discord con amigos: el ruido de fondo de los
+  // micros abiertos vive sobre 0,04 y da picos de 0,12. Por debajo de esto, la
+  // musica bajaba el 15% del tiempo sin que nadie hablara.
+  threshold: 0.12,
+  // Medido en una llamada real: los avisos y clics duran 150 ms de mediana, y
+  // una voz dura segundos. 300 ms deja fuera lo primero sin tocar lo segundo.
+  sustainMs: 300,
   reduction: 0.4,
+  proportional: false,
+  range: 0.25,
   attackMs: 60,
   releaseMs: 400,
   holdMs: 350,
@@ -49,6 +65,8 @@ export const DUCKING_PRESETS = {
 
 /** Cuando debe activarse un modo solo, sin que nadie pulse nada. */
 export type AutoActivate = {
+  /** Se pone solo al abrir Sonora. Solo un modo puede tenerlo. */
+  onStartup: boolean;
   /** Ejecutables que lo disparan: ["VALORANT.exe"] */
   processes: string[];
   /** Identificadores de dispositivo de salida que lo disparan */
@@ -69,6 +87,7 @@ export const CYCLE_HOTKEY = "CommandOrControl+Alt+0";
 export const RESET_HOTKEY = "CommandOrControl+Alt+9";
 
 export const DEFAULT_AUTO: AutoActivate = {
+  onStartup: false,
   processes: [],
   devices: [],
   schedule: null,
@@ -77,13 +96,16 @@ export const DEFAULT_AUTO: AutoActivate = {
 export type Mode = {
   id: string;
   name: string;
+  /** Nota tuya sobre para qué sirve el modo. Se ve en su tarjeta. */
+  description: string;
   /** Clave de MODE_ICONS; ver src/lib/icons.ts */
   icon: string;
   /** Color hex; al activar el modo tine la aplicacion entera */
   accent: string;
   /** Acelerador global, formato de Tauri: "CommandOrControl+Alt+1" */
   hotkey: string | null;
-  ducking: Ducking;
+  /** Varias a la vez: permite montar las dos direcciones */
+  duckingRules: DuckingRule[];
   autoActivate: AutoActivate;
   rules: AppRule[];
   /**
@@ -109,6 +131,18 @@ export function matches(pattern: string, exe: string): boolean {
   if (p.startsWith("*")) return target.endsWith(p.slice(1));
   if (p.endsWith("*")) return target.startsWith(p.slice(0, -1));
   return target === p;
+}
+
+/**
+ * Convierte un patron en algo legible: "*ventrilo*" -> "Ventrilo".
+ *
+ * Los asteriscos son sintaxis interna; nadie deberia tener que descifrarlos
+ * para entender su propia configuracion.
+ */
+export function prettyPattern(pattern: string): string {
+  const limpio = pattern.replace(/\*/g, "").replace(/\.exe$/i, "").trim();
+  if (!limpio) return pattern;
+  return limpio.charAt(0).toUpperCase() + limpio.slice(1);
 }
 
 export function ruleFor(mode: Mode, exe: string): AppRule | undefined {
@@ -150,14 +184,20 @@ export function rulesFromCurrent(groups: AppGroup[]): AppRule[] {
     }));
 }
 
+/** Regla nueva vacía, para el botón "Añadir regla". */
+export function newRule(): DuckingRule {
+  return { ...DEFAULT_RULE, triggers: [], targets: [] };
+}
+
 export function newMode(): Mode {
   return {
     id: crypto.randomUUID(),
     name: "Modo nuevo",
+    description: "",
     icon: "sliders",
     accent: "#38bdf8",
     hotkey: null,
-    ducking: { ...DEFAULT_DUCKING },
+    duckingRules: [],
     autoActivate: { ...DEFAULT_AUTO },
     rules: [],
     fallbackVolume: null,
@@ -192,12 +232,41 @@ export function inSchedule(
  * Los modos guardados por una version anterior no tienen los campos nuevos, y
  * pasarle un `ducking` undefined a Rust reventaria la deserializacion.
  */
+/** Convierte la configuracion antigua de una sola regla en la lista nueva. */
+function migrateRules(mode: Mode & { ducking?: Partial<DuckingRule> }): DuckingRule[] {
+  if (Array.isArray(mode.duckingRules)) {
+    return mode.duckingRules.map((rule) => ({ ...DEFAULT_RULE, ...rule, ...subeUmbralViejo(rule) }));
+  }
+  // Solo se conserva si estaba activada; una regla apagada no aporta nada.
+  if (mode.ducking?.enabled) return [{ ...DEFAULT_RULE, ...mode.ducking }];
+  return [];
+}
+
+/**
+ * Sube el umbral de las reglas guardadas antes de medirlo bien.
+ *
+ * El 0,05 de antes no lo eligio nadie: era nuestro valor por defecto, y con el
+ * la musica bajaba sola el 15% del tiempo en una llamada normal. Solo se toca
+ * si esta clavado en ese valor Y la regla es de antes (no tiene `sustainMs`);
+ * si alguien lo movio a mano, se respeta.
+ */
+function subeUmbralViejo(rule: Partial<DuckingRule>): Partial<DuckingRule> {
+  const esDeAntes = rule.sustainMs === undefined;
+  const nuncaTocado = rule.threshold === 0.05;
+  return esDeAntes && nuncaTocado ? { threshold: DEFAULT_RULE.threshold } : {};
+}
+
 export function normalize(mode: Mode): Mode {
   return {
     ...mode,
+    // El modo de fabrica se llamo "Musica", sin tilde. Solo se corrige si nadie
+    // lo ha renombrado.
+    name: mode.id === "music" && mode.name === "Musica" ? "Música" : mode.name,
     // Los modos guardados con emoji se traducen al icono equivalente.
     icon: resolveIcon(mode.icon),
-    ducking: { ...DEFAULT_DUCKING, ...(mode.ducking ?? {}) },
+    description: mode.description ?? "",
+    // Los modos guardados antes tenian UNA sola regla en `ducking`.
+    duckingRules: migrateRules(mode),
     autoActivate: { ...DEFAULT_AUTO, ...(mode.autoActivate ?? {}) },
     rules: mode.rules ?? [],
     fallbackVolume: mode.fallbackVolume ?? null,
@@ -215,10 +284,11 @@ export const DEFAULT_MODES: Mode[] = [
   {
     id: "competitive",
     name: "Competitivo",
+    description: "Voz por encima de todo. El juego baja en cuanto alguien habla.",
     icon: "crosshair",
     accent: "#f43f5e",
     hotkey: "CommandOrControl+Alt+1",
-    ducking: { ...DEFAULT_DUCKING, enabled: true, ...DUCKING_PRESETS.agresivo },
+    duckingRules: [{ ...DEFAULT_RULE, ...DUCKING_PRESETS.agresivo }],
     autoActivate: { ...DEFAULT_AUTO },
     rules: [
       { match: "*discord*", volume: 1, muted: false },
@@ -231,10 +301,11 @@ export const DEFAULT_MODES: Mode[] = [
   {
     id: "cinema",
     name: "Cine",
+    description: "La película manda: Discord bajo y la música callada.",
     icon: "clapperboard",
     accent: "#a78bfa",
     hotkey: "CommandOrControl+Alt+2",
-    ducking: { ...DEFAULT_DUCKING, enabled: false },
+    duckingRules: [],
     autoActivate: { ...DEFAULT_AUTO },
     rules: [
       { match: "*discord*", volume: 0.25, muted: false },
@@ -244,25 +315,32 @@ export const DEFAULT_MODES: Mode[] = [
   },
   {
     id: "music",
-    name: "Musica",
+    name: "Música",
+    description: "Música al 100% que baja al 30% mientras alguien habla.",
     icon: "headphones",
     accent: "#34d399",
     hotkey: "CommandOrControl+Alt+3",
-    ducking: { ...DEFAULT_DUCKING, enabled: true, ...DUCKING_PRESETS.suave },
+    // La música baja al 30% mientras alguien habla, con curva suave para que
+    // no dé un tirón. Discord se queda al 100%: si bajas la música para oír a
+    // quien habla, lo último que quieres es tenerlo a medio volumen.
+    duckingRules: [
+      { ...DEFAULT_RULE, ...DUCKING_PRESETS.suave, reduction: 0.3 },
+    ],
     autoActivate: { ...DEFAULT_AUTO },
     rules: [
       { match: "Spotify.exe", volume: 1, muted: false },
-      { match: "*discord*", volume: 0.5, muted: false },
+      { match: "*discord*", volume: 1, muted: false },
     ],
-    fallbackVolume: 0.4,
+    fallbackVolume: null,
   },
   {
     id: "stream",
     name: "Stream",
+    description: "Equilibrio para directo: se oye todo sin taparse.",
     icon: "radio",
     accent: "#fb923c",
     hotkey: "CommandOrControl+Alt+4",
-    ducking: { ...DEFAULT_DUCKING, enabled: true, ...DUCKING_PRESETS.normal },
+    duckingRules: [{ ...DEFAULT_RULE, ...DUCKING_PRESETS.normal }],
     autoActivate: { ...DEFAULT_AUTO, processes: ["obs64.exe"] },
     rules: [
       { match: "*discord*", volume: 0.8, muted: false },
@@ -273,10 +351,11 @@ export const DEFAULT_MODES: Mode[] = [
   {
     id: "night",
     name: "Noche",
+    description: "Todo bajito a partir de las 23:00 para no despertar a nadie.",
     icon: "moon",
     accent: "#60a5fa",
     hotkey: "CommandOrControl+Alt+5",
-    ducking: { ...DEFAULT_DUCKING, enabled: false },
+    duckingRules: [],
     autoActivate: { ...DEFAULT_AUTO, schedule: { from: "23:00", to: "08:00" } },
     rules: [],
     fallbackVolume: 0.25,

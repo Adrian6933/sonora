@@ -1,28 +1,36 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { AlertTriangle } from "lucide-react";
 
 import { Rail, type Section } from "./components/Rail";
 import { TitleBar } from "./components/TitleBar";
 import { ModeEditor } from "./components/modes/ModeEditor";
-import { MixerSection } from "./components/sections/MixerSection";
+import { HomeSection } from "./components/sections/HomeSection";
+import {
+  MixerSection,
+  type MixerTab,
+} from "./components/sections/MixerSection";
+import { BoostSection } from "./components/sections/BoostSection";
 import { ModesSection } from "./components/sections/ModesSection";
 import { SettingsSection } from "./components/sections/SettingsSection";
 import { useApplyMode } from "./hooks/useApplyMode";
 import { useAutomation } from "./hooks/useAutomation";
+import { useBoosts } from "./hooks/useBoosts";
 import { useDevices } from "./hooks/useDevices";
-import { useDuckingGain } from "./hooks/useDucking";
+import { useDuckingGain, useEspejos } from "./hooks/useDucking";
 import { prettyAccel, useHotkeys } from "./hooks/useHotkeys";
 import { useIcons } from "./hooks/useIcons";
 import { useMaximized } from "./hooks/useMaximized";
 import { useSessions } from "./hooks/useSessions";
-import { ipc } from "./lib/ipc";
-import { DEFAULT_DUCKING, newMode, type Mode } from "./lib/modes";
+import { ipc, onTrayMode, onTrayReset } from "./lib/ipc";
+import { newMode, type Mode } from "./lib/modes";
 import { useModes } from "./store/modes";
 
 const TITLES: Record<Section, string> = {
+  home: "Inicio",
   mixer: "Mezclador",
   modes: "Modos",
+  boost: "Amplificar",
   settings: "Ajustes",
 };
 
@@ -30,7 +38,10 @@ const TITLES: Record<Section, string> = {
 export default function App() {
   const { groups, master, error, setVolume, toggleMute, setMasterVolume } =
     useSessions();
-  const icons = useIcons(groups.map((group) => group.path));
+  const icons = useIcons([
+    ...groups.map((group) => group.path),
+    ...useModes.getState().knownApps.map((app) => app.path),
+  ]);
   const { devices, current: currentDevice } = useDevices();
 
   const {
@@ -46,11 +57,22 @@ export default function App() {
     replaceAll,
     resetHotkey,
     setResetHotkey,
+    knownApps,
+    presets,
+    observe,
+    setPreset,
+    forgetApp,
   } = useModes();
 
   const maximized = useMaximized();
-  const [section, setSection] = useState<Section>("mixer");
+  const [section, setSection] = useState<Section>("home");
+  const [mixerTab, setMixerTab] = useState<MixerTab>("sonando");
   const [editing, setEditing] = useState<Mode | null>(null);
+
+  // Los medidores de amplificacion van a diez por segundo; solo se pagan
+  // mientras su pantalla esta a la vista.
+  const { boosts, errores: erroresBoost, setBoost, clearBoosts } =
+    useBoosts(section === "boost");
 
   useEffect(() => {
     void hydrate();
@@ -58,11 +80,12 @@ export default function App() {
 
   const applyMode = useApplyMode(groups, { setVolume, toggleMute });
   const duckingGain = useDuckingGain();
+  const espejos = useEspejos();
 
   function activate(mode: Mode) {
     setActive(mode.id);
     applyMode(mode);
-    void ipc.setDucking(mode.ducking).catch(() => {});
+    void ipc.setDucking(mode.duckingRules).catch(() => {});
 
     // Sin esto los atajos globales son de fe: con el juego delante no habria
     // ninguna senal de que el modo ha cambiado.
@@ -78,13 +101,71 @@ export default function App() {
     if (!hydrated) return;
 
     const mode = useModes.getState().modes.find((m) => m.id === activeModeId);
-    void ipc.setDucking(mode?.ducking ?? DEFAULT_DUCKING).catch(() => {});
+    void ipc.setDucking(mode?.duckingRules ?? []).catch(() => {});
   }, [hydrated, activeModeId]);
+
+  // El modo de arranque, si alguno lo tiene marcado.
+  //
+  // Solo se aplica una vez y solo si no venias con otro puesto: si elegiste un
+  // modo antes de cerrar, se respeta esa eleccion.
+  const arranqueHecho = useRef(false);
+  useEffect(() => {
+    if (!hydrated || arranqueHecho.current) return;
+    arranqueHecho.current = true;
+
+    if (activeModeId) return;
+    const inicial = useModes
+      .getState()
+      .modes.find((m) => m.autoActivate.onStartup);
+    if (inicial) activate(inicial);
+    // Solo al hidratar; las dependencias reales ya estan cubiertas por la
+    // bandera de una sola vez.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated]);
+
+  // La bandeja enseña los modos y el activo marcado. Solo se reenvia cuando
+  // cambia algo que se ve en el menu, no en cada render.
+  const firmaBandeja = modes.map((m) => `${m.id}:${m.name}`).join("|");
+  useEffect(() => {
+    if (!hydrated) return;
+    void ipc
+      .setTrayModes(
+        modes.map((m) => ({ id: m.id, name: m.name })),
+        activeModeId
+      )
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, firmaBandeja, activeModeId]);
+
+  // Y lo que se elige en la bandeja llega aqui, que es quien sabe aplicarlo.
+  // Refs para que el listener, registrado una vez, no mire un estado viejo.
+  const desdeBandeja = useRef({ activate, clearMode: () => clearMode(), resetEverything });
+  desdeBandeja.current = { activate, clearMode: () => clearMode(), resetEverything };
+  useEffect(() => {
+    const quitar: Array<() => void> = [];
+    let vivo = true;
+
+    void onTrayMode((id) => {
+      const acciones = desdeBandeja.current;
+      if (id === null) return acciones.clearMode();
+      const modo = useModes.getState().modes.find((m) => m.id === id);
+      if (modo) acciones.activate(modo);
+    }).then((fn) => (vivo ? quitar.push(fn) : fn()));
+
+    void onTrayReset(() => desdeBandeja.current.resetEverything()).then((fn) =>
+      vivo ? quitar.push(fn) : fn()
+    );
+
+    return () => {
+      vivo = false;
+      quitar.forEach((fn) => fn());
+    };
+  }, []);
 
   /** Sin modo: se quedan los volumenes como esten, pero se apaga el ducking. */
   function clearMode() {
     setActive(null);
-    void ipc.setDucking(DEFAULT_DUCKING).catch(() => {});
+    void ipc.setDucking([]).catch(() => {});
   }
 
   /**
@@ -104,6 +185,37 @@ export default function App() {
       .flashHud({ name: "Todo al 100%", icon: "🔊", accent: "#38bdf8" })
       .catch(() => {});
   }
+
+  // Apuntar en el registro lo que suena, para la pestana "Todas".
+  useEffect(() => {
+    if (groups.length) observe(groups);
+  }, [groups, observe]);
+
+  /**
+   * Aplica el volumen preparado en cuanto una aplicacion vuelve a sonar.
+   *
+   * Solo al APARECER, nunca de forma continua: si no, no podrias mover su
+   * slider —lo devolveria al valor preparado al instante siguiente.
+   */
+  const seenKeys = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!hydrated) return;
+
+    const current = new Set(groups.map((group) => group.key));
+    const { presets: saved } = useModes.getState();
+
+    for (const group of groups) {
+      if (seenKeys.current.has(group.key)) continue;
+
+      const preset = saved[group.key];
+      if (preset) {
+        setVolume(group.pids, preset.volume);
+        if (preset.muted !== group.muted) toggleMute(group.pids, preset.muted);
+      }
+    }
+
+    seenKeys.current = current;
+  }, [groups, hydrated, setVolume, toggleMute]);
 
   useAutomation(modes, activeModeId, activate, clearMode);
 
@@ -154,14 +266,14 @@ export default function App() {
         <Rail active={section} onChange={setSection} />
 
         <div className="flex min-w-0 flex-1 flex-col">
-        <div className="relative z-[1] px-6 pb-4 pt-3">
+        <div className="relative z-[1] px-4 pb-4 pt-3 sm:px-6">
           <h1 className="text-[21px] font-semibold leading-none tracking-[-0.025em]">
             {TITLES[section]}
           </h1>
         </div>
 
         {failedHotkeys.length > 0 && (
-          <div className="relative z-[1] mx-7 mb-3 flex items-start gap-2 rounded-[12px] border border-[#78350f] bg-[#451a03] px-3 py-2.5 text-[10px] leading-relaxed text-[#fcd34d]">
+          <div className="relative z-[1] mx-4 mb-3 flex items-start gap-2 rounded-[12px] sm:mx-6 border border-[#78350f] bg-[#451a03] px-3 py-2.5 text-[10px] leading-relaxed text-[#fcd34d]">
             <AlertTriangle size={12} className="mt-px shrink-0" />
             <span>
               No se pudieron registrar{" "}
@@ -176,18 +288,38 @@ export default function App() {
         )}
 
         {error && (
-          <div className="relative z-[1] mx-7 mb-3 rounded-[12px] border border-[#7f1d1d] bg-[#450a0a] px-3 py-2.5 text-[11px] text-[#fca5a5]">
+          <div className="relative z-[1] mx-4 mb-3 rounded-[12px] border border-[#7f1d1d] sm:mx-6 bg-[#450a0a] px-3 py-2.5 text-[11px] text-[#fca5a5]">
             {error}
           </div>
         )}
 
-        <div className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-6 pb-6">
+        <div className="relative z-[1] flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-6 pt-2 sm:px-6">
           <motion.div
             key={section}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.18 }}
+            className="flex min-h-0 flex-1 flex-col"
           >
+            {section === "home" && (
+              <HomeSection
+                modes={modes}
+                activeMode={activeMode}
+                groups={groups}
+                icons={icons}
+                master={master}
+                device={currentDevice}
+                duckingGain={duckingGain}
+                espejos={espejos}
+                resetHotkey={resetHotkey}
+                onActivate={activate}
+                onMaster={setMasterVolume}
+                onVolume={setVolume}
+                onToggleMute={toggleMute}
+                onReset={resetEverything}
+              />
+            )}
+
             {section === "mixer" && (
               <MixerSection
                 groups={groups}
@@ -201,6 +333,12 @@ export default function App() {
                 onReset={resetEverything}
                 resetHotkey={resetHotkey}
                 modeActive={Boolean(activeMode)}
+                knownApps={knownApps}
+                presets={presets}
+                onPreset={setPreset}
+                onForget={forgetApp}
+                tab={mixerTab}
+                onTab={setMixerTab}
               />
             )}
 
@@ -211,6 +349,17 @@ export default function App() {
                 onActivate={activate}
                 onEdit={setEditing}
                 onCreate={() => setEditing(newMode())}
+              />
+            )}
+
+            {section === "boost" && (
+              <BoostSection
+                groups={groups}
+                icons={icons}
+                boosts={boosts}
+                errores={erroresBoost}
+                onBoost={setBoost}
+                onClear={clearBoosts}
               />
             )}
 
@@ -235,6 +384,8 @@ export default function App() {
             mode={editing}
             groups={groups}
             devices={devices}
+            knownApps={knownApps}
+            icons={icons}
             canDelete={modes.some((mode) => mode.id === editing.id)}
             onSave={upsert}
             onDelete={remove}

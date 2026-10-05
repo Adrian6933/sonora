@@ -5,7 +5,9 @@ import { RotateCcw, Speaker } from "lucide-react";
 import { prettyAccel } from "../../hooks/useHotkeys";
 import type { AppGroup } from "../../lib/group";
 import type { AudioDevice } from "../../lib/ipc";
+import { offlineApps, type KnownApp, type Preset } from "../../lib/known";
 import { ChannelStrip } from "../mixer/ChannelStrip";
+import { PresetStrip } from "../mixer/PresetStrip";
 
 type Props = {
   groups: AppGroup[];
@@ -20,7 +22,17 @@ type Props = {
   onReset: () => void;
   resetHotkey: string;
   modeActive: boolean;
+
+  /** Aplicaciones vistas alguna vez, para la pestaña "Todas" */
+  knownApps: KnownApp[];
+  presets: Record<string, Preset>;
+  onPreset: (key: string, preset: Preset | null) => void;
+  onForget: (key: string) => void;
+  tab: MixerTab;
+  onTab: (tab: MixerTab) => void;
 };
+
+export type MixerTab = "sonando" | "todas";
 
 export function MixerSection({
   groups,
@@ -34,11 +46,23 @@ export function MixerSection({
   onReset,
   resetHotkey,
   modeActive,
+  knownApps,
+  presets,
+  onPreset,
+  onForget,
+  tab,
+  onTab,
 }: Props) {
   const ducking = duckingGain < 0.99;
 
+  // "Sonando" son las que emiten audio ahora mismo. "Todas" añade las que
+  // Sonora ha visto alguna vez, para dejarles el volumen preparado.
+  const sonando = groups.filter((group) => group.active);
+  const visibles = tab === "sonando" ? sonando : groups;
+  const offline = tab === "todas" ? offlineApps(knownApps, groups) : [];
+
   return (
-    <div className="overflow-hidden rounded-[10px] border border-[var(--color-line)] bg-[var(--color-surface)]">
+    <div className="flex h-full max-h-[640px] w-full flex-col overflow-hidden rounded-[10px] border border-[var(--color-line)] bg-[var(--color-surface)]">
       {/* Cabecera de la mesa */}
       <div className="flex items-center gap-3 border-b border-[var(--color-line)] bg-black/20 px-4 py-2.5">
         <Speaker size={14} className="shrink-0 text-[var(--color-faint)]" />
@@ -94,10 +118,28 @@ export function MixerSection({
         </button>
       </div>
 
+      {/* Pestañas */}
+      <div className="flex gap-1 border-b border-[var(--color-line)] bg-black/10 px-3 py-1.5">
+        <Tab
+          selected={tab === "sonando"}
+          onClick={() => onTab("sonando")}
+          count={sonando.length}
+        >
+          Sonando ahora
+        </Tab>
+        <Tab
+          selected={tab === "todas"}
+          onClick={() => onTab("todas")}
+          count={groups.length + offlineApps(knownApps, groups).length}
+        >
+          Todas
+        </Tab>
+      </div>
+
       {/* Canales */}
-      <div className="flex">
+      <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 divide-x divide-[var(--color-line)] overflow-x-auto">
-          {groups.map((group) => (
+          {visibles.map((group) => (
             <ChannelStrip
               key={group.key}
               session={group}
@@ -107,9 +149,22 @@ export function MixerSection({
             />
           ))}
 
-          {groups.length === 0 && (
+          {offline.map((app) => (
+            <PresetStrip
+              key={app.key}
+              app={app}
+              icon={icons[app.path]}
+              preset={presets[app.key]}
+              onPreset={(preset) => onPreset(app.key, preset)}
+              onForget={() => onForget(app.key)}
+            />
+          ))}
+
+          {visibles.length === 0 && offline.length === 0 && (
             <p className="flex-1 px-6 py-20 text-center text-[12px] leading-relaxed text-[var(--color-faint)]">
-              Ninguna aplicación está usando el audio.
+              {tab === "sonando"
+                ? "Ninguna aplicación está emitiendo audio ahora mismo."
+                : "Todavía no se ha visto ninguna aplicación usar el audio."}
               <br />
               Pon música o abre un juego y aparecerá aquí.
             </p>
@@ -117,12 +172,12 @@ export function MixerSection({
         </div>
 
         {/* Canal principal, separado del resto como en una mesa de verdad */}
-        <div className="flex w-[128px] shrink-0 flex-col items-center border-l-2 border-[var(--color-line)] bg-black/20 px-4 py-4">
+        <div className="flex h-full w-[132px] shrink-0 flex-col items-center border-l-2 border-[var(--color-line)] bg-black/20 px-4 py-4">
           <span className="tabular text-[17px] font-semibold leading-none tracking-[-0.02em]">
             {Math.round(master * 100)}
           </span>
 
-          <div className="mt-4 flex h-[228px] items-stretch">
+          <div className="mt-3 flex min-h-[90px] w-full min-w-0 flex-1 items-stretch justify-center">
             <Slider.Root
               orientation="vertical"
               className="relative flex w-[26px] touch-none justify-center select-none"
@@ -149,11 +204,54 @@ export function MixerSection({
             </Slider.Root>
           </div>
 
-          <span className="mt-auto pt-4 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-faint)]">
+          {/* Huecos del mismo alto que el boton de mute y el icono de los
+              otros canales, para que el fader General acabe a la misma altura
+              que los demas en vez de colgar por debajo. */}
+          <div className="mt-4 h-6 shrink-0" />
+          <div className="mt-3 h-9 shrink-0" />
+
+          <span className="mt-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-faint)]">
             General
           </span>
         </div>
       </div>
     </div>
+  );
+}
+
+function Tab({
+  selected,
+  onClick,
+  count,
+  children,
+}: {
+  selected: boolean;
+  onClick: () => void;
+  count: number;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition"
+      style={{
+        background: selected
+          ? "color-mix(in srgb, var(--accent) 14%, transparent)"
+          : "transparent",
+        color: selected ? "var(--accent)" : "var(--color-faint)",
+      }}
+    >
+      {children}
+      <span
+        className="tabular rounded px-1 text-[9px]"
+        style={{
+          background: selected
+            ? "color-mix(in srgb, var(--accent) 22%, transparent)"
+            : "rgba(255,255,255,0.06)",
+        }}
+      >
+        {count}
+      </span>
+    </button>
   );
 }

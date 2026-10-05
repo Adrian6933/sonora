@@ -21,9 +21,29 @@ use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
 use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
-fn cache() -> &'static Mutex<HashMap<String, Option<String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+/// Cuantas veces se reintenta antes de dar por imposible un icono.
+///
+/// Un fallo puede ser pasajero (el hilo todavia sin COM, el ejecutable en un
+/// disco que acaba de despertar). Cachear el primer "no" dejaba a aplicaciones
+/// como Steam con la letra de siempre aunque su icono se sacara sin problema un
+/// segundo despues.
+const INTENTOS: u8 = 3;
+
+struct Cache {
+    /// Iconos ya resueltos. Un `None` aqui es definitivo.
+    iconos: HashMap<String, Option<String>>,
+    /// Fallos acumulados por ruta, hasta llegar a `INTENTOS`.
+    fallos: HashMap<String, u8>,
+}
+
+fn cache() -> &'static Mutex<Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(Cache {
+            iconos: HashMap::new(),
+            fallos: HashMap::new(),
+        })
+    })
 }
 
 /// Icono de un ejecutable como data URI PNG, listo para un `<img src>`.
@@ -32,24 +52,38 @@ pub fn icon_data_uri(path: &str) -> Option<String> {
         return None;
     }
 
-    if let Ok(map) = cache().lock() {
-        if let Some(hit) = map.get(path) {
+    if let Ok(guardado) = cache().lock() {
+        if let Some(hit) = guardado.iconos.get(path) {
             return hit.clone();
         }
     }
 
-    let result = extract(path).map(|png| {
+    let resultado = extract(path).map(|png| {
         format!(
             "data:image/png;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(png)
         )
     });
 
-    if let Ok(mut map) = cache().lock() {
-        map.insert(path.to_string(), result.clone());
+    if let Ok(mut guardado) = cache().lock() {
+        match &resultado {
+            Some(_) => {
+                guardado.iconos.insert(path.to_string(), resultado.clone());
+                guardado.fallos.remove(path);
+            }
+            None => {
+                let fallos = guardado.fallos.entry(path.to_string()).or_insert(0);
+                *fallos += 1;
+                // Solo despues de varios intentos se da por perdido; hasta
+                // entonces la siguiente pasada vuelve a probar.
+                if *fallos >= INTENTOS {
+                    guardado.iconos.insert(path.to_string(), None);
+                }
+            }
+        }
     }
 
-    result
+    resultado
 }
 
 fn extract(path: &str) -> Option<Vec<u8>> {

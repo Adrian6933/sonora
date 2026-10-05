@@ -3,10 +3,13 @@
 //! Todo el COM crudo vive aqui dentro. El resto de la aplicacion habla con
 //! este modulo mediante tipos normales de Rust y nunca ve un puntero COM.
 
+pub mod boost;
+pub mod boosts;
 pub mod com;
 pub mod com_thread;
 pub mod devices;
 pub mod ducking;
+pub mod escucha;
 pub mod icons;
 pub mod process;
 pub mod sessions;

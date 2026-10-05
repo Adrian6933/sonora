@@ -375,3 +375,197 @@ Lo único que probablemente te falte son las Build Tools de C++ (Rust las necesi
 - [ ] ¿Open source en GitHub o cerrado?
 - [ ] ¿Gratis, de pago o gratis con versión pro?
 - [ ] ¿Merece la pena el certificado de firma de código (~200-400 €/año) para evitar el aviso de SmartScreen?
+
+---
+
+## Estado a 9 sep 2026
+
+Además de v0–v3, construido a petición directa:
+
+- **Pantalla de Inicio** — modo activo en grande, cambio rápido y solo lo que está sonando
+- **Mezclador como mesa de mezclas** — tiras verticales con faders, a ancho completo y adaptable
+- **Dos pestañas**: «Sonando ahora» y «Todas» (incluye apps cerradas, con volumen preparado que se aplica al abrirlas)
+- **Varias reglas de prioridad por modo** — permite las dos direcciones a la vez
+- **Umbral de activación con medidor en vivo**, estilo sensibilidad de Discord, con escala raíz cuadrada
+- **Botón y atajo «Todo al 100%»** (`Ctrl+Alt+9`)
+- **Descripción por modo**
+- **Icono propio**, instalador y app registrada en Windows
+- **Instancia única**, arranque con Windows, importar/exportar modos
+
+### Trampas encontradas, para no repetirlas
+
+1. **Cargo cachea el script de compilación.** Tras cambiar los iconos hay que borrar a mano `src-tauri/target/release/build/sonora-*`; `cargo clean -p sonora` no basta. Verificar buscando los bytes del `.ico` dentro del `.exe`, nunca con `ExtractAssociatedIcon` (usa la caché del shell y miente).
+2. **Los `console.log` del webview no llegan al log de Vite**, solo `warn` y `error`.
+3. **`unregisterAll` de los atajos es global**: todos deben registrarse desde un único sitio.
+4. **El ducking exponencial miente**: con una rampa exponencial, «400 ms de release» tarda mucho más. Debe ser lineal.
+5. **Al volver a reposo hay que escribir el volumen exacto**, o la base se degrada en cada ciclo.
+6. **`grow` en un slider vertical de Radix** lo estira a lo ancho.
+7. **Alturas con `vh` no descuentan la cabecera**: usar `flex-1` + `min-h-0`.
+
+## Amplificar por encima del 100% (12 sep 2026)
+
+Hecho. Apartado nuevo en la barra lateral, mando de 100% a 400% por aplicacion,
+medidor de entrada con la marca de donde deja de haber margen.
+
+Motor en `src-tauri/src/audio/boost.rs`. Tres cosas que solo se descubren
+midiendo y que estan documentadas en la cabecera del modulo:
+
+1. La captura por proceso entrega el audio DESPUES del volumen de la sesion.
+   Silenciar la original da silencio. Se deja al 2% y se compensa.
+2. El formato de captura tiene que ser el nativo del dispositivo. En unos
+   auriculares 7.1, pedir estereo pierde casi cinco veces de nivel.
+3. El PROPVARIANT de la activacion no se puede dejar caer: tumba el proceso con
+   STATUS_HEAP_CORRUPTION.
+
+Medido con un tono constante: pidiendo x3 sale x2,99. La ganancia es exacta.
+
+Pendiente de confirmar con el oido: nuestra copia sale unos 4 dB por debajo de
+lo que deberia a ganancia 1, y no se ha encontrado la causa. Puede ser un
+artefacto del medidor y no del sonido. Hay que preguntarle a Adrian si al 100%
+se oye igual que con el amplificador apagado.
+
+## Medidores espejo (12 sep 2026)
+
+El medidor de Discord reflejaba la mezcla de todo el sistema, asi que cualquier
+regla que lo usara de disparador saltaba sola con la musica. El motor de ducking
+ahora reconoce ese patron y deja de usar esa sesion como disparador, y la
+pantalla de inicio lo avisa. Dos tests cubren el caso bueno y el peligroso.
+
+## Comprobacion previa al amplificar (12 sep 2026)
+
+Bug serio encontrado por Adrian: al subir el mando, la aplicacion bajaba al 2% y
+dejaba de oirse. Causa: se bajaba el volumen ANTES de saber si la captura por
+proceso entregaba algo, y si no entregaba nada el usuario se quedaba mudo y sin
+pista de por que.
+
+Ahora `bucle` comprueba durante 1,2 s que llega audio de verdad antes de tocar
+ningun volumen, y si no llega devuelve un error que la interfaz enseña en la
+propia fila. El mando vuelve al 100% solo.
+
+De paso se aclaro lo de los 4 dB que faltaban: era cosa del dispositivo de 8
+canales. En una salida estereo sale clavado (ganancia 1 da 0,2027 para una
+fuente de 0,2000; ganancia 3 da 0,6026).
+
+## Pendiente: el Spotify de esta maquina
+
+Su medidor de sesion marca picos de 0,4 y el medidor de NINGUNA salida activa
+refleja nada. No es descarga por hardware (comprobado con `IsOffloadCapable` en
+las cuatro salidas: ninguna la admite). Con un tono de referencia en la misma
+salida, captura y medidor funcionan perfectos, asi que la maquinaria esta bien.
+Queda por saber si Adrian oye Spotify en ese estado. El depurador tiene
+`salidas`, `formato` y `descarga` para volver a mirarlo.
+
+## El ducking saltaba solo (12 sep 2026)
+
+Adrian: "el modo musica baja todo el rato Spotify al 30%" con Discord en
+silencio aparente. Medido DENTRO de la app, porque medir desde fuera no vale:
+`GetPeakValue` devuelve el pico desde la ultima lectura, asi que dos lectores se
+roban las muestras y el de fuera ve ceros. Esto se aprende una vez.
+
+Lo que emite Discord en una llamada real con amigos:
+
+    mediana 0,0386   p90 0,1246   max 0,435
+
+Con el umbral de 0,05 de antes, atenuaba el 15% del tiempo sin que nadie
+hablara. Dos cambios:
+
+1. `sustain_ms`: hay que MANTENERSE por encima del umbral para contar como voz.
+   Los avisos y clics duran 150 ms de mediana; una voz dura segundos. Por
+   defecto 300 ms. El contador baja restando, no reiniciando, para que las
+   pausas entre silabas no corten la atenuacion.
+2. Umbral por defecto 0,05 -> 0,12, y migracion de las reglas guardadas que
+   siguieran en 0,05 sin haberlo tocado.
+
+Simulado sobre las 487 muestras reales: con 0,12 y 300 ms, 0% de falsos.
+Comprobado en vivo: cinco muestras seguidas con Spotify al 100%.
+
+Ademas, boton "Calibrar con el silencio" en el editor: escucha 5 s y deja el
+umbral por encima del ruido de fondo de esa llamada.
+
+## Editor de modos por pestañas (12 sep 2026)
+
+Era una columna larga donde todo pesaba igual. Ahora son cuatro pestañas
+—General, Cuando se activa, Prioridad, Volumenes— con la cabecera enseñando el
+modo tal y como quedara.
+
+Novedades dentro:
+
+- `autoActivate.onStartup`: el modo con el que arranca Sonora. Solo uno puede
+  tenerlo; marcarlo en uno se lo quita al anterior (se resuelve en `upsert`).
+- `AppPicker`: elegir el juego de una lista con buscador en vez de escribir
+  "VALORANT.exe" de memoria. Sale lo que esta abierto ahora (comando nuevo
+  `list_open_apps`) mas lo que Sonora ha visto antes, y queda un hueco para
+  escribirlo a mano si el juego esta cerrado y nunca se ha visto.
+
+## El 2% ya no se ve (12 sep 2026)
+
+Adrian: "subo Spotify al 110% y en el mezclador se pone al 2%". Ese 2% es la
+SOMBRA que necesita la captura, y enseñarlo era mentir: lo que se oye es su
+volumen de siempre multiplicado por la amplificacion.
+
+Ahora el amplificador guarda una `base` (el volumen normal) aparte de la
+ganancia, y la salida es `base * ganancia`. Un registro global en `boost.rs`
+comparte las dos con `sessions.rs`:
+
+- `list_sessions` enseña la base en vez del 2%, y añade el campo `boost` para
+  que la interfaz pinte el distintivo "x1,1".
+- `set_session_volume` y `apply_volumes` escriben en la base cuando la
+  aplicacion esta amplificada. Asi arrastrar el mando —o el propio ducking— no
+  pisa la sombra ni corta el sonido.
+- Al soltar la amplificacion se devuelve la base, no el volumen que habia al
+  empezar: si lo movio mientras amplificaba, esa es su ultima palabra.
+
+El registro es por proceso, asi que el depurador externo sigue viendo el 2%
+real. Es lo correcto: el enmascarado es cosa de la aplicacion.
+
+## Ronda de revision y mejoras (14 sep 2026)
+
+Fallos encontrados al revisar:
+
+- Salir desde la bandeja deshacia el ducking pero no la amplificacion: la
+  aplicacion amplificada se quedaba al 2%. Ahora se limpian las dos.
+- `set_app_boost` era una orden sincrona y arrancar comprueba la captura 1,2 s:
+  en Tauri eso corre en el hilo principal y congelaba la ventana. Ahora va en
+  `spawn_blocking`, y `list_boosts` tambien, porque esperaba al mismo cerrojo.
+- `hay_captura` leia solo dos canales aunque el formato fuera de ocho.
+- Las amplificaciones de aplicaciones ya cerradas se quedaban en la lista con un
+  PID muerto. Se podan en cada `set` y `list`.
+
+Mejoras:
+
+- Rescate tras cierre brusco: cada amplificacion se apunta en
+  `%APPDATA%/com.sonora.app/amplificaciones-activas.json` (por ejecutable, no
+  PID). Al arrancar, lo que siga clavado en la sombra vuelve a su volumen.
+  Comprobado matando el proceso a proposito: 2% -> 100% y apunte borrado.
+- Aviso de volumen interno bajo en Amplificar: si una aplicacion genera mucho
+  mas de lo que deja salir, se le dice al usuario que suba la barra de la propia
+  aplicacion. Es el caso de Spotify con la barra a un tercio: 0,44 generado,
+  0,013 saliendo.
+- Modos en el menu de la bandeja, con el activo marcado, "Sin modo" y "Todo al
+  100%". La interfaz sigue siendo quien aplica el modo; la bandeja solo avisa.
+  Sin probar a mano el menu: habria que tomar el raton del usuario.
+
+## Escuchar lo que Discord reproduce de verdad (14 sep 2026)
+
+El umbral y los 300 ms tapaban el problema pero no lo quitaban: el medidor de
+sesion de Discord seguia reflejando el sonido de todo el ordenador. Medido
+comparando en el mismo instante medidor y captura por proceso durante 12 s:
+
+- En 99 de 121 muestras Discord no reproducia nada (captura 0,0000).
+- En 91 de esas, su medidor era identico al del dispositivo: reflejo puro.
+- El reflejo llego a 0,32, por encima del umbral de 0,12.
+- Cuando Discord sonaba de verdad, medidor y captura coincidian.
+
+Solucion en `audio/escucha.rs`: a los disparadores de las reglas activas, a
+las apps de voz (Discord, TeamSpeak, Ventrilo, Mumble) y a lo que pida el
+editor, se les abre una captura por proceso. Cada una acumula su pico en un
+atomico que solo lee el hilo de audio, asi que tampoco hay robo de muestras.
+En el tick, `peak` pasa a ser el nivel real y el del medidor queda en
+`meter_peak`. Si la captura falla se vuelve al medidor; mientras arranca se
+usa cero para no dejar pasar el reflejo esos milisegundos.
+
+En la interfaz, el medidor del umbral enseña dos barras: la de color es lo que
+suena en la aplicacion y la rayada el reflejo, con leyenda "no cuenta".
+
+Tambien: "Musica" -> "Música" en el modo de fabrica, con migracion si nadie lo
+habia renombrado.
